@@ -197,6 +197,42 @@ else()
 endif()
 
 # ============================================================================
+# EJECUTABLE GUI (ImGui + OpenGL + GLFW)
+# ============================================================================
+
+# Buscar dependencias GUI
+find_package(glfw3 CONFIG QUIET)
+find_package(imgui CONFIG QUIET)
+
+if(glfw3_FOUND AND imgui_FOUND)
+    message(STATUS "GUI habilitada: ImGui + GLFW encontrados")
+    
+    add_executable(arkade_gui
+        src/gui_app.cpp
+    )
+    
+    target_link_libraries(arkade_gui
+        glfw
+        imgui::imgui
+        opengl32
+    )
+    
+    if(MSVC)
+        set_target_properties(arkade_gui PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_BINARY_DIR}/bin
+            RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR}/bin
+        )
+        # Mantener consola para depuración
+        target_link_options(arkade_gui PRIVATE "/SUBSYSTEM:CONSOLE")
+    endif()
+    
+    message(STATUS "Ejecutable GUI: arkade_gui")
+else()
+    message(STATUS "GUI deshabilitada: ImGui o GLFW no encontrados")
+    message(STATUS "  Para habilitar: vcpkg install imgui[opengl3-binding,glfw-binding]:x64-windows glfw3:x64-windows")
+endif()
+
+# ============================================================================
 # INFORMACIÓN DE CONFIGURACIÓN
 # ============================================================================
 

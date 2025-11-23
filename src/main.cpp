@@ -240,6 +240,13 @@ int main(int argc, char** argv) {
             ExportadorResultados::guardar_resultados_knn("results/ARKADE_knn_euclidean.csv", resultados);
             auto metricas = validar_resultados(resultados, gt_l2, K);
             resultados_l2.emplace_back("Arkade OptiX", tiempo_ms, metricas);
+            
+            // Guardar tiempo para GUI
+            std::ofstream tiempo_file("results/last_search_time.txt");
+            if (tiempo_file.is_open()) {
+                tiempo_file << tiempo_ms;
+                tiempo_file.close();
+            }
         }
         /*
         // FAISS CPU L2
@@ -307,6 +314,13 @@ int main(int argc, char** argv) {
             ExportadorResultados::guardar_resultados_knn("results/ARKADE_knn_manhattan.csv", resultados);
             auto metricas = validar_resultados(resultados, gt_l1, K);
             resultados_l1.emplace_back("Arkade OptiX", tiempo_ms, metricas);
+            
+            // Guardar tiempo para GUI
+            std::ofstream tiempo_file("results/last_search_time.txt");
+            if (tiempo_file.is_open()) {
+                tiempo_file << tiempo_ms;
+                tiempo_file.close();
+            }
         }
         /*
         // FastRNN L1 (GPU Baseline - usa RT Cores con ajuste para Manhattan)
@@ -376,6 +390,13 @@ int main(int argc, char** argv) {
             ExportadorResultados::guardar_resultados_knn("results/ARKADE_knn_chebyshev.csv", resultados);
             auto metricas = validar_resultados(resultados, gt_linf, K);
             resultados_linf.emplace_back("Arkade OptiX", tiempo_ms, metricas);
+            
+            // Guardar tiempo para GUI
+            std::ofstream tiempo_file("results/last_search_time.txt");
+            if (tiempo_file.is_open()) {
+                tiempo_file << tiempo_ms;
+                tiempo_file.close();
+            }
         }
         /*
         // FastRNN L∞ (GPU Baseline - usa RT Cores con ajuste para Chebyshev)
@@ -445,6 +466,13 @@ int main(int argc, char** argv) {
             ExportadorResultados::guardar_resultados_knn("results/ARKADE_knn_cosine.csv", resultados);
             auto metricas = validar_resultados(resultados, gt_cosine, K);
             resultados_cosine.emplace_back("Arkade OptiX", tiempo_ms, metricas);
+            
+            // Guardar tiempo para GUI
+            std::ofstream tiempo_file("results/last_search_time.txt");
+            if (tiempo_file.is_open()) {
+                tiempo_file << tiempo_ms;
+                tiempo_file.close();
+            }
         }
         /*
         // FAISS CPU Cosine
