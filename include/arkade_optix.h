@@ -416,13 +416,18 @@ void ArkadeOptiX::construir_gas_con_radio(float radio) {
                 aabbs[i].maxZ = p.z + radio;
                 break;
                 
-            case 3: // Coseno - ESFERA en espacio normalizado
-                aabbs[i].minX = p.x - radio;
-                aabbs[i].minY = p.y - radio;
-                aabbs[i].minZ = p.z - radio;
-                aabbs[i].maxX = p.x + radio;
-                aabbs[i].maxY = p.y + radio;
-                aabbs[i].maxZ = p.z + radio;
+            case 3: // Cosine (distancia angular)
+                // dist_angular = arccos(cos(θ))
+                // En esfera unitaria: dist_euclidiana = 2 * sin(dist_angular / 2)
+                // Para ángulos pequeños: dist_euclidiana ≈ dist_angular
+                // Radio euclidiano para AABB
+                float radio_euclidiano = 2.0f * sinf(radio / 2.0f);
+                aabbs[i].minX = p.x - radio_euclidiano;
+                aabbs[i].minY = p.y - radio_euclidiano;
+                aabbs[i].minZ = p.z - radio_euclidiano;
+                aabbs[i].maxX = p.x + radio_euclidiano;
+                aabbs[i].maxY = p.y + radio_euclidiano;
+                aabbs[i].maxZ = p.z + radio_euclidiano;
                 break;
         }
     }
@@ -578,7 +583,16 @@ std::vector<ResultadoVecino> ArkadeOptiX::buscar_radius(const Punto3D& query, fl
         );
         
         for (int i = 0; i < num_real; i++) {
-            resultados.emplace_back(ids_host[i], dists_host[i]);
+            float dist = dists_host[i];
+            
+            // Para distancia coseno: convertir de L2 a coseno
+            // dist_L2 = sqrt(2 * dist_coseno)
+            // dist_coseno = dist_L2² / 2
+            if (tipo_distancia == 3) {
+                dist = (dist * dist) / 2.0f;
+            }
+            
+            resultados.emplace_back(ids_host[i], dist);
         }
     }
     
@@ -598,8 +612,17 @@ std::vector<std::vector<ResultadoVecino>> ArkadeOptiX::buscar_knn_batch(
     std::vector<std::vector<ResultadoVecino>> resultados;
     resultados.reserve(queries.size());
     
-    // Radio inicial
-    float radio = 50.0f;
+    // Radio inicial - ajustado según tipo de distancia
+    float radio;
+    if (tipo_distancia == 3) {
+        // Distancia coseno: 1 - cos(θ), rango [0, 2]
+        // Ground truth tiene distancias ~1e-05
+        // Usamos radio pequeño inicial y expandimos si es necesario
+        radio = 0.1f;
+    } else {
+        // L2, L1, Linf: usar radio grande
+        radio = 50.0f;
+    }
     
     // CONSTRUIR GAS UNA SOLA VEZ para todas las queries
     std::cout << "Construyendo GAS una vez para " << queries.size() << " queries..." << std::endl;

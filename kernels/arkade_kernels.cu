@@ -44,9 +44,16 @@ __device__ __forceinline__ float distancia_linf(float3 a, float3 b) {
 }
 
 __device__ __forceinline__ float distancia_coseno(float3 a, float3 b) {
-    // Asume vectores normalizados
+    // Vectores ya vienen normalizados desde el host
+    // Distancia angular = arccos(similitud_coseno)
+    // Similitud coseno = producto punto de vectores normalizados
     float producto_punto = a.x*b.x + a.y*b.y + a.z*b.z;
-    return 1.0f - producto_punto;
+    
+    // Clamp para evitar errores numéricos
+    producto_punto = fminf(fmaxf(producto_punto, -1.0f), 1.0f);
+    
+    // Distancia angular en [0, π]
+    return acosf(producto_punto);
 }
 
 __device__ __forceinline__ bool intersecta_esfera(float3 punto, float3 centro, float radio) {
@@ -87,7 +94,10 @@ extern "C" __global__ void __raygen__rg() {
     float radio = params.radio;
     int tipo_dist = params.tipo_distancia;
     
-    // Verificar si está dentro del radio usando AABB primero (filtro grueso)
+    // Calcular distancia exacta
+    float dist;
+    
+    // Pre-filtro AABB para todas las métricas (incluyendo coseno)
     float dx = fabsf(punto.x - query.x);
     float dy = fabsf(punto.y - query.y);
     float dz = fabsf(punto.z - query.z);
@@ -96,7 +106,6 @@ extern "C" __global__ void __raygen__rg() {
     if (dx > radio || dy > radio || dz > radio) return;
     
     // Calcular distancia exacta (refinamiento)
-    float dist;
     switch(tipo_dist) {
         case 0:
             dist = distancia_l2(query, punto);
@@ -203,74 +212,4 @@ extern "C" __global__ void __closesthit__ch() {
         params.resultados_ids[pos] = id;
         params.resultados_dists[pos] = dist;
     }
-}
-
-// ============================================================================
-// KERNEL CUDA PARA BUSQUEDA LINEAL (FALLBACK)
-// ============================================================================
-
-__global__ void busqueda_lineal_kernel(
-    const float3* puntos,
-    const int* ids,
-    int num_puntos,
-    float3 query,
-    float radio,
-    int tipo_distancia,
-    int* resultados_ids,
-    float* resultados_dists,
-    int* num_resultados) {
-    
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    
-    if (idx >= num_puntos) return;
-    
-    float3 punto = puntos[idx];
-    float dist;
-    
-    switch(tipo_distancia) {
-        case 0:
-            dist = distancia_l2(query, punto);
-            break;
-        case 1:
-            dist = distancia_l1(query, punto);
-            break;
-        case 2:
-            dist = distancia_linf(query, punto);
-            break;
-        case 3:
-            dist = distancia_coseno(query, punto);
-            break;
-    }
-    
-    if (dist <= radio) {
-        int pos = atomicAdd(num_resultados, 1);
-        if (pos < 10000) {
-            resultados_ids[pos] = ids[idx];
-            resultados_dists[pos] = dist;
-        }
-    }
-}
-
-// ============================================================================
-// FUNCIÓN WRAPPER PARA LLAMAR DESDE C++
-// ============================================================================
-
-extern "C" void lanzar_busqueda_lineal(
-    const float3* puntos,
-    const int* ids,
-    int num_puntos,
-    float3 query,
-    float radio,
-    int tipo_distancia,
-    int* resultados_ids,
-    float* resultados_dists,
-    int* num_resultados) {
-    
-    const int threads_per_block = 256;
-    const int num_blocks = (num_puntos + threads_per_block - 1) / threads_per_block;
-    
-    busqueda_lineal_kernel<<<num_blocks, threads_per_block>>>(
-        puntos, ids, num_puntos, query, radio, tipo_distancia,
-        resultados_ids, resultados_dists, num_resultados
-    );
 }
