@@ -724,6 +724,7 @@ void ArkadeOptiX::limpiar_recursos() {
     if (programa_raygen) optixProgramGroupDestroy(programa_raygen);
     if (modulo_optix) optixModuleDestroy(modulo_optix);
     if (contexto_optix) optixDeviceContextDestroy(contexto_optix);
+
 }
 
 #endif // ARKADE_OPTIX_H

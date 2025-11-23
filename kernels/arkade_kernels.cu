@@ -336,6 +336,7 @@ extern "C" __global__ void __miss__ms() {
  *   - Para L1: octaedro (33% ocupacion AABB)
  *   - Para Linf: cubo (100% ocupacion AABB = sin falsos positivos)
  * 
+ * 
  * Si pasa el test, reportamos interseccion con t_hit = 0 (rayo puntual).
  */
 extern "C" __global__ void __intersection__is() {
