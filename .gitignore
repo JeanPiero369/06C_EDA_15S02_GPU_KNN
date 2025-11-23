@@ -106,7 +106,7 @@ results/
 
 # Downloaded files
 *.crdownload
-*.csv
+results/
 *.ps1
 external/
 temp_install/

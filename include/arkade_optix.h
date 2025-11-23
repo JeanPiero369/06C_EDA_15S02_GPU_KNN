@@ -112,6 +112,7 @@ public:
     void construir_gas();
     void crear_pipeline();
     void configurar_sbt();
+    void construir_gas_con_radio(float radio); // Construir GAS una vez con radio específico
     std::vector<ResultadoVecino> buscar_radius(const Punto3D& query, float radio);
     std::vector<std::vector<ResultadoVecino>> buscar_knn_batch(
         const std::vector<Punto3D>& queries, int k);
@@ -192,87 +193,9 @@ void ArkadeOptiX::cargar_datos(const std::vector<Punto3D>& puntos) {
 }
 
 void ArkadeOptiX::construir_gas() {
-    // Crear AABBs para cada punto
-    std::vector<OptixAabb> aabbs(datos.size());
+    // Construir GAS con radio inicial grande que se reutilizará
+    std::cout << "Inicializando pipeline OptiX (GAS se construirá en batch)" << std::endl;
     
-    const std::vector<Punto3D>& datos_usar = 
-        (tipo_distancia == 3) ? datos_normalizados : datos;
-    
-    // Radio fijo inicial (se ajustará en cada query)
-    float radio_inicial = 100.0f;
-    
-    for (size_t i = 0; i < datos_usar.size(); i++) {
-        const auto& p = datos_usar[i];
-        aabbs[i].minX = p.x - radio_inicial;
-        aabbs[i].minY = p.y - radio_inicial;
-        aabbs[i].minZ = p.z - radio_inicial;
-        aabbs[i].maxX = p.x + radio_inicial;
-        aabbs[i].maxY = p.y + radio_inicial;
-        aabbs[i].maxZ = p.z + radio_inicial;
-    }
-    
-    // Buffer de AABBs en GPU
-    CUdeviceptr buffer_aabbs;
-    size_t tam_aabbs = aabbs.size() * sizeof(OptixAabb);
-    verificar_cu(cuMemAlloc(&buffer_aabbs, tam_aabbs), "Asignar buffer_aabbs");
-    verificar_cuda(
-        cudaMemcpy(reinterpret_cast<void*>(buffer_aabbs), aabbs.data(),
-                   tam_aabbs, cudaMemcpyHostToDevice),
-        "Copiar AABBs a GPU"
-    );
-    
-    // Configurar build input
-    OptixBuildInput build_input = {};
-    build_input.type = OPTIX_BUILD_INPUT_TYPE_CUSTOM_PRIMITIVES;
-    
-    unsigned int flags[1] = { OPTIX_GEOMETRY_FLAG_NONE };
-    build_input.customPrimitiveArray.aabbBuffers = &buffer_aabbs;
-    build_input.customPrimitiveArray.numPrimitives = static_cast<unsigned int>(aabbs.size());
-    build_input.customPrimitiveArray.numSbtRecords = 1;
-    build_input.customPrimitiveArray.flags = flags;
-    
-    // Opciones de construcción
-    OptixAccelBuildOptions build_options = {};
-    build_options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION;
-    build_options.operation = OPTIX_BUILD_OPERATION_BUILD;
-    
-    // Calcular memoria requerida
-    OptixAccelBufferSizes tam_buffers;
-    verificar_optix(
-        optixAccelComputeMemoryUsage(contexto_optix, &build_options, &build_input, 1, &tam_buffers),
-        "Calcular memoria GAS"
-    );
-    
-    // Asignar buffers temporales
-    CUdeviceptr buffer_temp;
-    verificar_cu(cuMemAlloc(&buffer_temp, tam_buffers.tempSizeInBytes), "Asignar buffer_temp");
-    verificar_cu(cuMemAlloc(&buffer_gas, tam_buffers.outputSizeInBytes), "Asignar buffer_gas");
-    
-    // Construir GAS
-    verificar_optix(
-        optixAccelBuild(
-            contexto_optix,
-            0, // stream
-            &build_options,
-            &build_input,
-            1,
-            buffer_temp,
-            tam_buffers.tempSizeInBytes,
-            buffer_gas,
-            tam_buffers.outputSizeInBytes,
-            &gas_handle, // Guardar handle
-            nullptr, 0
-        ),
-        "Construir GAS"
-    );
-    
-    // Liberar buffers temporales
-    verificar_cuda(cudaFree(reinterpret_cast<void*>(buffer_temp)), "Liberar buffer_temp");
-    verificar_cuda(cudaFree(reinterpret_cast<void*>(buffer_aabbs)), "Liberar buffer_aabbs");
-    
-    std::cout << "GAS construido correctamente (handle=" << gas_handle << ")" << std::endl;
-    
-    // Ahora crear el pipeline y SBT
     crear_pipeline();
     configurar_sbt();
 }
@@ -455,6 +378,118 @@ void ArkadeOptiX::configurar_sbt() {
     std::cout << "SBT configurado correctamente" << std::endl;
 }
 
+void ArkadeOptiX::construir_gas_con_radio(float radio) {
+    const std::vector<Punto3D>& datos_usar = 
+        (tipo_distancia == 3) ? datos_normalizados : datos;
+    
+    // Crear AABBs que encierren las formas geométricas según la métrica
+    std::vector<OptixAabb> aabbs(datos_usar.size());
+    
+    for (size_t i = 0; i < datos_usar.size(); i++) {
+        const auto& p = datos_usar[i];
+        
+        switch(tipo_distancia) {
+            case 0: // L2 (Euclidean) - ESFERA de radio r
+                aabbs[i].minX = p.x - radio;
+                aabbs[i].minY = p.y - radio;
+                aabbs[i].minZ = p.z - radio;
+                aabbs[i].maxX = p.x + radio;
+                aabbs[i].maxY = p.y + radio;
+                aabbs[i].maxZ = p.z + radio;
+                break;
+                
+            case 1: // L1 (Manhattan) - OCTAEDRO/ROMBO de radio r
+                aabbs[i].minX = p.x - radio;
+                aabbs[i].minY = p.y - radio;
+                aabbs[i].minZ = p.z - radio;
+                aabbs[i].maxX = p.x + radio;
+                aabbs[i].maxY = p.y + radio;
+                aabbs[i].maxZ = p.z + radio;
+                break;
+                
+            case 2: // L∞ (Chebyshev) - CUBO de radio r
+                aabbs[i].minX = p.x - radio;
+                aabbs[i].minY = p.y - radio;
+                aabbs[i].minZ = p.z - radio;
+                aabbs[i].maxX = p.x + radio;
+                aabbs[i].maxY = p.y + radio;
+                aabbs[i].maxZ = p.z + radio;
+                break;
+                
+            case 3: // Coseno - ESFERA en espacio normalizado
+                aabbs[i].minX = p.x - radio;
+                aabbs[i].minY = p.y - radio;
+                aabbs[i].minZ = p.z - radio;
+                aabbs[i].maxX = p.x + radio;
+                aabbs[i].maxY = p.y + radio;
+                aabbs[i].maxZ = p.z + radio;
+                break;
+        }
+    }
+    
+    // Subir AABBs a GPU
+    CUdeviceptr buffer_aabbs_temp;
+    size_t tam_aabbs = aabbs.size() * sizeof(OptixAabb);
+    verificar_cu(cuMemAlloc(&buffer_aabbs_temp, tam_aabbs), "Asignar buffer_aabbs");
+    verificar_cuda(
+        cudaMemcpy(reinterpret_cast<void*>(buffer_aabbs_temp), aabbs.data(),
+                   tam_aabbs, cudaMemcpyHostToDevice),
+        "Copiar AABBs a GPU"
+    );
+    
+    // Configurar build input
+    OptixBuildInput build_input = {};
+    build_input.type = OPTIX_BUILD_INPUT_TYPE_CUSTOM_PRIMITIVES;
+    unsigned int flags[1] = { OPTIX_GEOMETRY_FLAG_NONE };
+    build_input.customPrimitiveArray.aabbBuffers = &buffer_aabbs_temp;
+    build_input.customPrimitiveArray.numPrimitives = static_cast<unsigned int>(aabbs.size());
+    build_input.customPrimitiveArray.numSbtRecords = 1;
+    build_input.customPrimitiveArray.flags = flags;
+    
+    // Opciones de construcción
+    OptixAccelBuildOptions build_options = {};
+    build_options.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
+    build_options.operation = OPTIX_BUILD_OPERATION_BUILD;
+    
+    // Calcular memoria
+    OptixAccelBufferSizes tam_buffers;
+    verificar_optix(
+        optixAccelComputeMemoryUsage(contexto_optix, &build_options, &build_input, 1, &tam_buffers),
+        "Calcular memoria GAS"
+    );
+    
+    // Liberar GAS anterior si existe
+    if (buffer_gas) cuMemFree(buffer_gas);
+    
+    // Construir GAS con RT CORES
+    CUdeviceptr buffer_temp_gas;
+    verificar_cu(cuMemAlloc(&buffer_temp_gas, tam_buffers.tempSizeInBytes), "Asignar temp_gas");
+    verificar_cu(cuMemAlloc(&buffer_gas, tam_buffers.outputSizeInBytes), "Asignar gas");
+    
+    verificar_optix(
+        optixAccelBuild(
+            contexto_optix,
+            0,
+            &build_options,
+            &build_input,
+            1,
+            buffer_temp_gas,
+            tam_buffers.tempSizeInBytes,
+            buffer_gas,
+            tam_buffers.outputSizeInBytes,
+            &gas_handle,
+            nullptr, 0
+        ),
+        "Construir GAS"
+    );
+    
+    // Liberar temporales
+    cuMemFree(buffer_temp_gas);
+    cuMemFree(buffer_aabbs_temp);
+    
+    std::cout << "GAS construido con radio " << radio << " (handle=" << gas_handle << ")" << std::endl;
+}
+
 std::vector<ResultadoVecino> ArkadeOptiX::buscar_radius(const Punto3D& query, float radio) {
     std::vector<ResultadoVecino> resultados;
     
@@ -463,12 +498,7 @@ std::vector<ResultadoVecino> ArkadeOptiX::buscar_radius(const Punto3D& query, fl
     Punto3D query_usar = (tipo_distancia == 3) ? query.normalizar() : query;
     
     // ========================================================================
-    // USAR GAS PRE-CONSTRUIDO (ya tiene AABBs grandes)
-    // Los RT Cores filtrarán con el BVH, luego refinamos en intersection kernel
-    // ========================================================================
-    
-    // ========================================================================
-    // FASE 2: PREPARAR BUFFERS DE SALIDA (usar GAS pre-construido)
+    // USAR GAS PRE-CONSTRUIDO (construido una vez en buscar_knn_batch)
     // ========================================================================
     
     const int MAX_RESULTADOS = 10000;
@@ -496,7 +526,7 @@ std::vector<ResultadoVecino> ArkadeOptiX::buscar_radius(const Punto3D& query, fl
     params_host.resultados_dists = d_resultados_dists;
     params_host.num_resultados = d_num_resultados;
     params_host.tipo_distancia = tipo_distancia;
-    params_host.gas_handle = gas_handle; // Usar GAS pre-construido (global)
+    params_host.gas_handle = gas_handle; // Usar GAS pre-construido global
     
     CUdeviceptr d_params;
     verificar_cu(cuMemAlloc(&d_params, sizeof(DatosLanzamiento)), "Malloc params");
@@ -568,9 +598,14 @@ std::vector<std::vector<ResultadoVecino>> ArkadeOptiX::buscar_knn_batch(
     std::vector<std::vector<ResultadoVecino>> resultados;
     resultados.reserve(queries.size());
     
-    // Radio adaptativo
+    // Radio inicial
     float radio = 50.0f;
     
+    // CONSTRUIR GAS UNA SOLA VEZ para todas las queries
+    std::cout << "Construyendo GAS una vez para " << queries.size() << " queries..." << std::endl;
+    construir_gas_con_radio(radio);
+    
+    // Procesar todas las queries con el mismo GAS
     for (size_t i = 0; i < queries.size(); i++) {
         if (i % 1000 == 0) {
             std::cout << "Procesando query " << i << "/" << queries.size() << std::endl;
@@ -578,9 +613,11 @@ std::vector<std::vector<ResultadoVecino>> ArkadeOptiX::buscar_knn_batch(
         
         auto res = buscar_radius(queries[i], radio);
         
-        // Ajustar radio si es necesario
+        // Si no hay suficientes resultados, reconstruir GAS con radio mayor
         if (res.size() < k) {
             radio *= 2.0f;
+            std::cout << "Radio insuficiente, reconstruyendo GAS con radio=" << radio << std::endl;
+            construir_gas_con_radio(radio);
             res = buscar_radius(queries[i], radio);
         }
         
