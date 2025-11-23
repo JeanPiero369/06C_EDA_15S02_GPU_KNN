@@ -46,22 +46,6 @@ set(FAISS_LIBRARIES faiss)
 message(STATUS "FAISS encontrado via vcpkg")
 
 # ============================================================================
-# NMSLIB (Non-Metric Space Library)
-# ============================================================================
-
-set(NMSLIB_ROOT "${CMAKE_SOURCE_DIR}/external/nmslib" CACHE PATH "Path to NMSLIB installation")
-
-if(EXISTS ${NMSLIB_ROOT})
-    include_directories(${NMSLIB_ROOT}/include)
-    link_directories(${NMSLIB_ROOT}/lib)
-    set(NMSLIB_LIBRARIES NonMetricSpaceLib)
-    message(STATUS "NMSLIB encontrado: ${NMSLIB_ROOT}")
-else()
-    message(WARNING "NMSLIB no encontrado - compilando sin soporte NMSLIB")
-    set(NMSLIB_LIBRARIES "")
-endif()
-
-# ============================================================================
 # FLANN (Fast Library for Approximate Nearest Neighbors)
 # ============================================================================
 
@@ -127,7 +111,6 @@ target_link_libraries(arkade_knn
     CUDA::cuda_driver
     ${FAISS_LIBRARIES}
     ${FLANN_LIBRARIES}
-    ${NMSLIB_LIBRARIES}
 )
 
 # OptiX es header-only excepto la inicialización
@@ -194,7 +177,6 @@ message(STATUS "CUDA Architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 message(STATUS "OptiX SDK: ${OptiX_INSTALL_DIR}")
 message(STATUS "CUDA Toolkit: ${CUDAToolkit_VERSION}")
 message(STATUS "FAISS Libraries: ${FAISS_LIBRARIES}")
-message(STATUS "NMSLIB Libraries: ${NMSLIB_LIBRARIES}")
 message(STATUS "FLANN Libraries: ${FLANN_LIBRARIES}")
 message(STATUS "PTX Output: ${PTX_OUTPUT_DIR}")
 message(STATUS "=========================================")

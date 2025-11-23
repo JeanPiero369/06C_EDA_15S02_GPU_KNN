@@ -2,8 +2,7 @@
 #include "utilidades.h"
 #include "arkade_optix.h"
 #include "baseline_faiss.h"
-// NMSLIB temporalmente deshabilitado debido a conflictos de compilación
-// #include "baseline_nmslib.h"
+#include "baseline_fastrnn.h"
 #include "baseline_flann.h"
 #include <iostream>
 #include <iomanip>
@@ -271,24 +270,27 @@ int main(int argc, char** argv) {
             resultados_l1.emplace_back("Arkade OptiX", tiempo_ms, metricas);
         }
         
-        // NMSLIB HNSW L1 (CPU Baseline) - DESHABILITADO temporalmente
-        /*{
-            std::cout << "\n--- NMSLIB HNSW L1 (CPU) ---" << std::endl;
-            BaselineNMSLIB_HNSW nmslib("manhattan");
-            nmslib.cargar_datos(datos);
-            nmslib.construir_indice();
-            
-            Temporizador timer("NMSLIB HNSW L1 (busqueda)");
-            auto resultados = nmslib.buscar_knn_batch(queries, K);
-            
-            ExportadorResultados::guardar_resultados_knn("results/NMSLIB_CPU_knn_manhattan.csv", resultados);
-            auto metricas = validar_resultados(resultados, gt_l1, K);
-            resultados_l1.emplace_back("NMSLIB HNSW CPU", metricas);
-        }*/
-        
-        // FLANN CPU L1 (GPU Baseline - aunque corre en CPU)
+        // FastRNN L1 (GPU Baseline - usa RT Cores con ajuste para Manhattan)
         {
-            std::cout << "\n--- FLANN CPU L1 (GPU Baseline) ---" << std::endl;
+            std::cout << "\n--- FastRNN GPU L1 (GPU Baseline) ---" << std::endl;
+            BaselineFastRNN fastrnn("manhattan");
+            fastrnn.cargar_datos(datos);
+            fastrnn.construir_indice();
+            
+            auto inicio = std::chrono::high_resolution_clock::now();
+            auto resultados = fastrnn.buscar_knn_batch(queries, K);
+            auto fin = std::chrono::high_resolution_clock::now();
+            double tiempo_ms = std::chrono::duration<double, std::milli>(fin - inicio).count();
+            std::cout << "FastRNN GPU L1 (busqueda): " << tiempo_ms << " ms" << std::endl;
+            
+            ExportadorResultados::guardar_resultados_knn("results/FastRNN_GPU_knn_manhattan.csv", resultados);
+            auto metricas = validar_resultados(resultados, gt_l1, K);
+            resultados_l1.emplace_back("FastRNN GPU", tiempo_ms, metricas);
+        }
+        
+        // FLANN CPU L1 (CPU Baseline)
+        {
+            std::cout << "\n--- FLANN CPU L1 (CPU Baseline) ---" << std::endl;
             BaselineFLANN flann("manhattan");
             flann.cargar_datos(datos);
             flann.construir_indice();
@@ -335,24 +337,27 @@ int main(int argc, char** argv) {
             resultados_linf.emplace_back("Arkade OptiX", tiempo_ms, metricas);
         }
         
-        // NMSLIB HNSW L∞ (CPU Baseline) - DESHABILITADO temporalmente
-        /*{
-            std::cout << "\n--- NMSLIB HNSW L∞ (CPU) ---" << std::endl;
-            BaselineNMSLIB_HNSW nmslib("chebyshev");
-            nmslib.cargar_datos(datos);
-            nmslib.construir_indice();
-            
-            Temporizador timer("NMSLIB HNSW L∞ (busqueda)");
-            auto resultados = nmslib.buscar_knn_batch(queries, K);
-            
-            ExportadorResultados::guardar_resultados_knn("results/NMSLIB_CPU_knn_chebyshev.csv", resultados);
-            auto metricas = validar_resultados(resultados, gt_linf, K);
-            resultados_linf.emplace_back("NMSLIB HNSW CPU", metricas);
-        }*/
-        
-        // FLANN CPU L∞ (GPU Baseline - aunque corre en CPU)
+        // FastRNN L∞ (GPU Baseline - usa RT Cores con ajuste para Chebyshev)
         {
-            std::cout << "\n--- FLANN CPU L∞ (GPU Baseline) ---" << std::endl;
+            std::cout << "\n--- FastRNN GPU L∞ (GPU Baseline) ---" << std::endl;
+            BaselineFastRNN fastrnn("chebyshev");
+            fastrnn.cargar_datos(datos);
+            fastrnn.construir_indice();
+            
+            auto inicio = std::chrono::high_resolution_clock::now();
+            auto resultados = fastrnn.buscar_knn_batch(queries, K);
+            auto fin = std::chrono::high_resolution_clock::now();
+            double tiempo_ms = std::chrono::duration<double, std::milli>(fin - inicio).count();
+            std::cout << "FastRNN GPU L∞ (busqueda): " << tiempo_ms << " ms" << std::endl;
+            
+            ExportadorResultados::guardar_resultados_knn("results/FastRNN_GPU_knn_chebyshev.csv", resultados);
+            auto metricas = validar_resultados(resultados, gt_linf, K);
+            resultados_linf.emplace_back("FastRNN GPU", tiempo_ms, metricas);
+        }
+        
+        // FLANN CPU L∞ (CPU Baseline)
+        {
+            std::cout << "\n--- FLANN CPU L∞ (CPU Baseline) ---" << std::endl;
             BaselineFLANN flann("chebyshev");
             flann.cargar_datos(datos);
             flann.construir_indice();
