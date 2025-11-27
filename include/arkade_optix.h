@@ -1,6 +1,8 @@
 #ifndef ARKADE_OPTIX_H
 #define ARKADE_OPTIX_H
 
+#define _USE_MATH_DEFINES  // Para M_PI en Windows
+#include <cmath>
 #include "utilidades.h"
 #include <optix.h>
 #include <optix_stubs.h>
@@ -17,16 +19,26 @@
 // ============================================================================
 
 struct DatosLanzamiento {
-    float3* puntos_datos;
-    int* ids_datos;
-    int num_puntos;
-    float3 query;
-    float radio;
-    int* resultados_ids;
-    float* resultados_dists;
-    int* num_resultados;
-    int tipo_distancia; // 0=L2, 1=L1, 2=Linf, 3=Coseno
-    OptixTraversableHandle gas_handle; // Handle del GAS
+    // Datos del dataset
+    float3* puntos_datos;           // Coordenadas de puntos en GPU
+    int* ids_datos;                 // IDs originales de puntos
+    int num_puntos;                 // Cantidad de puntos
+    
+    // BATCH de queries (para paralelismo)
+    float3* queries;                // Array de queries
+    int num_queries;                // Numero de queries en el batch
+    float radio;                    // Radio de busqueda
+    
+    // Buffers de resultados (uno por query)
+    // Layout: [query0_result0, query0_result1, ..., query1_result0, ...]
+    int* resultados_ids;            // IDs de vecinos: [num_queries * k]
+    float* resultados_dists;        // Distancias: [num_queries * k]
+    int* num_resultados;            // Contador por query: [num_queries]
+    int k;                          // Numero de vecinos por query
+    
+    // Configuracion
+    int tipo_distancia;             // 0=L2, 1=L1, 2=Linf, 3=Coseno
+    OptixTraversableHandle gas_handle;
 };
 
 struct AABBData {
@@ -69,6 +81,18 @@ private:
     CUdeviceptr miss_record;
     CUdeviceptr hitgroup_record;
     
+    // Buffers persistentes para resultados (evitar malloc/free por query)
+    int* d_resultados_ids_persistente;
+    float* d_resultados_dists_persistente;
+    int* d_num_resultados_persistente;
+    float3* d_queries_persistente;  // Buffer de queries en GPU
+    CUdeviceptr d_params_persistente;
+    bool buffers_inicializados;
+    bool gas_construido;
+    float radio_gas;  // Radio con el que se construyo el GAS
+    int max_batch_size;  // Tamaño máximo del batch
+    int k_actual;  // K actual para el que se asignaron los buffers
+    
     std::vector<Punto3D> datos;
     std::vector<Punto3D> datos_normalizados;
     int tipo_distancia;
@@ -99,7 +123,20 @@ private:
     }
     
 public:
-    ArkadeOptiX(int tipo_dist) : tipo_distancia(tipo_dist) {
+    ArkadeOptiX(int tipo_dist) : tipo_distancia(tipo_dist),
+        contexto_optix(nullptr), modulo_optix(nullptr),
+        programa_raygen(nullptr), programa_miss(nullptr), programa_hitgroup(nullptr),
+        pipeline(nullptr), buffer_gas(0), gas_handle(0),
+        buffer_lanzamiento(nullptr), buffer_puntos(nullptr), buffer_ids(nullptr),
+        buffer_resultados_ids(nullptr), buffer_resultados_dists(nullptr),
+        buffer_num_resultados(nullptr),
+        raygen_record(0), miss_record(0), hitgroup_record(0),
+        d_resultados_ids_persistente(nullptr), d_resultados_dists_persistente(nullptr),
+        d_num_resultados_persistente(nullptr), d_queries_persistente(nullptr),
+        d_params_persistente(0),
+        buffers_inicializados(false), gas_construido(false), radio_gas(0.0f),
+        max_batch_size(0), k_actual(0) {
+        sbt = {};
         inicializar_optix();
     }
     
@@ -115,7 +152,7 @@ public:
     void construir_gas_con_radio(float radio); // Construir GAS una vez con radio específico
     std::vector<ResultadoVecino> buscar_radius(const Punto3D& query, float radio);
     std::vector<std::vector<ResultadoVecino>> buscar_knn_batch(
-        const std::vector<Punto3D>& queries, int k);
+        const std::vector<Punto3D>& queries, int k, float radio);
     void limpiar_recursos();
 };
 
@@ -273,11 +310,13 @@ void ArkadeOptiX::crear_pipeline() {
         "Crear programa miss"
     );
     
-    // Hitgroup program
+    // Hitgroup program con ANYHIT para capturar TODOS los hits (radius query)
     OptixProgramGroupDesc desc_hitgroup = {};
     desc_hitgroup.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
     desc_hitgroup.hitgroup.moduleCH = modulo_optix;
     desc_hitgroup.hitgroup.entryFunctionNameCH = "__closesthit__ch";
+    desc_hitgroup.hitgroup.moduleAH = modulo_optix;  // ANYHIT program
+    desc_hitgroup.hitgroup.entryFunctionNameAH = "__anyhit__ah";
     desc_hitgroup.hitgroup.moduleIS = modulo_optix;
     desc_hitgroup.hitgroup.entryFunctionNameIS = "__intersection__is";
     
@@ -382,54 +421,38 @@ void ArkadeOptiX::construir_gas_con_radio(float radio) {
     const std::vector<Punto3D>& datos_usar = 
         (tipo_distancia == 3) ? datos_normalizados : datos;
     
-    // Crear AABBs que encierren las formas geométricas según la métrica
+    // ========================================================================
+    // CONSTRUCCION DE AABBs SEGUN EL PAPER ARKADE
+    // ========================================================================
+    // EQUIVALENCIA MATEMATICA:
+    //   Buscar puntos dentro de radio R desde query 
+    //   ≡ Query (punto) intersecta AABBs de radio R centrados en dataset
+    //
+    // Por lo tanto:
+    //   - AABBs: Cubos de lado 2*radio centrados en cada punto del dataset
+    //   - Rayo: Puntual (longitud ~0) desde la query
+    //   - RT Cores retornan AABBs intersectados = CANDIDATOS
+    //   - Refine: Verificar geometria exacta (esfera/octaedro/cubo)
+    //
+    // AABB OCCUPANCY por metrica:
+    //   - L2 (esfera): ~52% del AABB contiene puntos validos
+    //   - L1 (octaedro): ~33% del AABB contiene puntos validos  
+    //   - Linf (cubo): 100% - AABB = geometria exacta
+    
     std::vector<OptixAabb> aabbs(datos_usar.size());
     
     for (size_t i = 0; i < datos_usar.size(); i++) {
         const auto& p = datos_usar[i];
         
-        switch(tipo_distancia) {
-            case 0: // L2 (Euclidean) - ESFERA de radio r
-                aabbs[i].minX = p.x - radio;
-                aabbs[i].minY = p.y - radio;
-                aabbs[i].minZ = p.z - radio;
-                aabbs[i].maxX = p.x + radio;
-                aabbs[i].maxY = p.y + radio;
-                aabbs[i].maxZ = p.z + radio;
-                break;
-                
-            case 1: // L1 (Manhattan) - OCTAEDRO/ROMBO de radio r
-                aabbs[i].minX = p.x - radio;
-                aabbs[i].minY = p.y - radio;
-                aabbs[i].minZ = p.z - radio;
-                aabbs[i].maxX = p.x + radio;
-                aabbs[i].maxY = p.y + radio;
-                aabbs[i].maxZ = p.z + radio;
-                break;
-                
-            case 2: // L∞ (Chebyshev) - CUBO de radio r
-                aabbs[i].minX = p.x - radio;
-                aabbs[i].minY = p.y - radio;
-                aabbs[i].minZ = p.z - radio;
-                aabbs[i].maxX = p.x + radio;
-                aabbs[i].maxY = p.y + radio;
-                aabbs[i].maxZ = p.z + radio;
-                break;
-                
-            case 3: // Cosine (distancia angular)
-                // dist_angular = arccos(cos(θ))
-                // En esfera unitaria: dist_euclidiana = 2 * sin(dist_angular / 2)
-                // Para ángulos pequeños: dist_euclidiana ≈ dist_angular
-                // Radio euclidiano para AABB
-                float radio_euclidiano = 2.0f * sinf(radio / 2.0f);
-                aabbs[i].minX = p.x - radio_euclidiano;
-                aabbs[i].minY = p.y - radio_euclidiano;
-                aabbs[i].minZ = p.z - radio_euclidiano;
-                aabbs[i].maxX = p.x + radio_euclidiano;
-                aabbs[i].maxY = p.y + radio_euclidiano;
-                aabbs[i].maxZ = p.z + radio_euclidiano;
-                break;
-        }
+        // AABB de lado 2*radio centrado en el punto del dataset
+        // Para TODAS las metricas usamos el mismo AABB (cubo)
+        // La diferencia esta en la fase REFINE donde verificamos geometria exacta
+        aabbs[i].minX = p.x - radio;
+        aabbs[i].minY = p.y - radio;
+        aabbs[i].minZ = p.z - radio;
+        aabbs[i].maxX = p.x + radio;
+        aabbs[i].maxY = p.y + radio;
+        aabbs[i].maxZ = p.z + radio;
     }
     
     // Subir AABBs a GPU
@@ -451,7 +474,7 @@ void ArkadeOptiX::construir_gas_con_radio(float radio) {
     build_input.customPrimitiveArray.numSbtRecords = 1;
     build_input.customPrimitiveArray.flags = flags;
     
-    // Opciones de construcción
+    // Opciones de construcción - RT CORES aceleran esto
     OptixAccelBuildOptions build_options = {};
     build_options.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
     build_options.operation = OPTIX_BUILD_OPERATION_BUILD;
@@ -466,7 +489,7 @@ void ArkadeOptiX::construir_gas_con_radio(float radio) {
     // Liberar GAS anterior si existe
     if (buffer_gas) cuMemFree(buffer_gas);
     
-    // Construir GAS con RT CORES
+    // Construir GAS (BVH) con RT CORES
     CUdeviceptr buffer_temp_gas;
     verificar_cu(cuMemAlloc(&buffer_temp_gas, tam_buffers.tempSizeInBytes), "Asignar temp_gas");
     verificar_cu(cuMemAlloc(&buffer_gas, tam_buffers.outputSizeInBytes), "Asignar gas");
@@ -492,169 +515,203 @@ void ArkadeOptiX::construir_gas_con_radio(float radio) {
     cuMemFree(buffer_temp_gas);
     cuMemFree(buffer_aabbs_temp);
     
-    std::cout << "GAS construido con radio " << radio << " (handle=" << gas_handle << ")" << std::endl;
+    std::cout << "GAS (BVH) construido: " << datos_usar.size() << " puntos (handle=" << gas_handle << ")" << std::endl;
 }
 
+// buscar_radius deprecado - usar buscar_knn_batch con k grande
 std::vector<ResultadoVecino> ArkadeOptiX::buscar_radius(const Punto3D& query, float radio) {
-    std::vector<ResultadoVecino> resultados;
-    
-    const std::vector<Punto3D>& datos_usar = 
-        (tipo_distancia == 3) ? datos_normalizados : datos;
-    Punto3D query_usar = (tipo_distancia == 3) ? query.normalizar() : query;
-    
-    // ========================================================================
-    // USAR GAS PRE-CONSTRUIDO (construido una vez en buscar_knn_batch)
-    // ========================================================================
-    
-    const int MAX_RESULTADOS = 10000;
-    int* d_resultados_ids;
-    float* d_resultados_dists;
-    int* d_num_resultados;
-    int h_num_resultados = 0;
-    
-    verificar_cuda(cudaMalloc(&d_resultados_ids, MAX_RESULTADOS * sizeof(int)), "Malloc resultados_ids");
-    verificar_cuda(cudaMalloc(&d_resultados_dists, MAX_RESULTADOS * sizeof(float)), "Malloc resultados_dists");
-    verificar_cuda(cudaMalloc(&d_num_resultados, sizeof(int)), "Malloc num_resultados");
-    verificar_cuda(cudaMemcpy(d_num_resultados, &h_num_resultados, sizeof(int), cudaMemcpyHostToDevice), "Copiar num_resultados inicial");
-    
-    // ========================================================================
-    // FASE 3: CONFIGURAR PARÁMETROS Y LANZAR RT CORES
-    // ========================================================================
-    
-    DatosLanzamiento params_host;
-    params_host.puntos_datos = reinterpret_cast<float3*>(buffer_puntos);
-    params_host.ids_datos = reinterpret_cast<int*>(buffer_ids);
-    params_host.num_puntos = static_cast<int>(datos_usar.size());
-    params_host.query = make_float3(query_usar.x, query_usar.y, query_usar.z);
-    params_host.radio = radio;
-    params_host.resultados_ids = d_resultados_ids;
-    params_host.resultados_dists = d_resultados_dists;
-    params_host.num_resultados = d_num_resultados;
-    params_host.tipo_distancia = tipo_distancia;
-    params_host.gas_handle = gas_handle; // Usar GAS pre-construido global
-    
-    CUdeviceptr d_params;
-    verificar_cu(cuMemAlloc(&d_params, sizeof(DatosLanzamiento)), "Malloc params");
-    verificar_cuda(
-        cudaMemcpy(reinterpret_cast<void*>(d_params), &params_host, 
-                   sizeof(DatosLanzamiento), cudaMemcpyHostToDevice),
-        "Copiar params a GPU"
-    );
-    
-    // Lanzar OptiX - procesar todos los puntos en paralelo con RT Cores
-    int num_puntos = static_cast<int>(datos_usar.size());
-    verificar_optix(
-        optixLaunch(
-            pipeline,
-            0,
-            d_params,
-            sizeof(DatosLanzamiento),
-            &sbt,
-            num_puntos, // Un thread por punto para filtrado paralelo
-            1,
-            1
-        ),
-        "optixLaunch"
-    );
-    
-    verificar_cuda(cudaDeviceSynchronize(), "Sincronizar después de optixLaunch");
-    
-    // ========================================================================
-    // FASE 4: RECUPERAR RESULTADOS
-    // ========================================================================
-    
-    verificar_cuda(
-        cudaMemcpy(&h_num_resultados, d_num_resultados, sizeof(int), cudaMemcpyDeviceToHost),
-        "Copiar num_resultados desde GPU"
-    );
-    
-    if (h_num_resultados > 0) {
-        int num_real = std::min(h_num_resultados, MAX_RESULTADOS);
-        std::vector<int> ids_host(num_real);
-        std::vector<float> dists_host(num_real);
-        
-        verificar_cuda(
-            cudaMemcpy(ids_host.data(), d_resultados_ids, num_real * sizeof(int), cudaMemcpyDeviceToHost),
-            "Copiar IDs desde GPU"
-        );
-        verificar_cuda(
-            cudaMemcpy(dists_host.data(), d_resultados_dists, num_real * sizeof(float), cudaMemcpyDeviceToHost),
-            "Copiar distancias desde GPU"
-        );
-        
-        for (int i = 0; i < num_real; i++) {
-            float dist = dists_host[i];
-            
-            // Para distancia coseno: convertir de L2 a coseno
-            // dist_L2 = sqrt(2 * dist_coseno)
-            // dist_coseno = dist_L2² / 2
-            if (tipo_distancia == 3) {
-                dist = (dist * dist) / 2.0f;
-            }
-            
-            resultados.emplace_back(ids_host[i], dist);
-        }
-    }
-    
-    // Limpiar
-    cudaFree(d_resultados_ids);
-    cudaFree(d_resultados_dists);
-    cudaFree(d_num_resultados);
-    cuMemFree(d_params);
-    
-    std::sort(resultados.begin(), resultados.end());
-    return resultados;
+    // Wrapper simple que usa la nueva API de batch
+    std::vector<Punto3D> queries_batch = {query};
+    auto resultados_batch = buscar_knn_batch(queries_batch, 10000, radio);
+    return resultados_batch.empty() ? std::vector<ResultadoVecino>() : resultados_batch[0];
 }
 
 std::vector<std::vector<ResultadoVecino>> ArkadeOptiX::buscar_knn_batch(
-    const std::vector<Punto3D>& queries, int k) {
+    const std::vector<Punto3D>& queries, int k, float radio) {
     
     std::vector<std::vector<ResultadoVecino>> resultados;
     resultados.reserve(queries.size());
     
-    // Radio inicial - ajustado según tipo de distancia
-    float radio;
-    if (tipo_distancia == 3) {
-        // Distancia coseno: 1 - cos(θ), rango [0, 2]
-        // Ground truth tiene distancias ~1e-05
-        // Usamos radio pequeño inicial y expandimos si es necesario
-        radio = 0.1f;
-    } else {
-        // L2, L1, Linf: usar radio grande
-        radio = 50.0f;
+    const std::vector<Punto3D>& datos_usar = 
+        (tipo_distancia == 3) ? datos_normalizados : datos;
+    
+    // ========================================================================
+    // CONVERSION DE RADIO PARA DISTANCIA COSENO
+    // ========================================================================
+    float radio_aabb = radio;
+    float radio_refine = radio;
+    
+    if (tipo_distancia == DIST_COSINE) {
+        const float PI = 3.14159265358979323846f;
+        float radio_angular = std::min(radio, PI);
+        radio_aabb = 2.0f * std::sin(radio_angular / 2.0f);
+        radio_refine = radio_angular;
+        std::cout << "Coseno: radio_angular=" << radio_angular 
+                  << ", radio_aabb=" << radio_aabb << std::endl;
     }
     
-    // CONSTRUIR GAS UNA SOLA VEZ para todas las queries
-    std::cout << "Construyendo GAS una vez para " << queries.size() << " queries..." << std::endl;
-    construir_gas_con_radio(radio);
+    // ========================================================================
+    // CONSTRUIR GAS UNA SOLA VEZ (si no existe o radio cambio)
+    // ========================================================================
+    if (!gas_construido || radio_gas != radio_aabb) {
+        std::cout << "Construyendo GAS (BVH) con radio=" << radio_aabb << "..." << std::endl;
+        construir_gas_con_radio(radio_aabb);
+        gas_construido = true;
+        radio_gas = radio_aabb;
+    }
     
-    // Procesar todas las queries con el mismo GAS
-    for (size_t i = 0; i < queries.size(); i++) {
-        if (i % 1000 == 0) {
-            std::cout << "Procesando query " << i << "/" << queries.size() << std::endl;
+    // ========================================================================
+    // PROCESAR QUERIES EN BATCHES PARALELOS
+    // ========================================================================
+    // En lugar de procesar 1 query a la vez, procesamos TODAS las queries
+    // en paralelo usando optixLaunch con num_queries threads.
+    // Cada thread procesa una query diferente.
+    
+    int num_queries = static_cast<int>(queries.size());
+    
+    // Reallocate buffers if needed (batch size or k changed)
+    if (!buffers_inicializados || num_queries > max_batch_size || k != k_actual) {
+        // Liberar buffers anteriores
+        if (d_resultados_ids_persistente) cudaFree(d_resultados_ids_persistente);
+        if (d_resultados_dists_persistente) cudaFree(d_resultados_dists_persistente);
+        if (d_num_resultados_persistente) cudaFree(d_num_resultados_persistente);
+        if (d_queries_persistente) cudaFree(d_queries_persistente);
+        if (d_params_persistente) cuMemFree(d_params_persistente);
+        
+        // Asignar nuevos buffers para TODAS las queries
+        // Layout: [query0_k_results, query1_k_results, ..., queryN_k_results]
+        size_t total_results = num_queries * k;
+        verificar_cuda(cudaMalloc(&d_resultados_ids_persistente, total_results * sizeof(int)), "Malloc resultados_ids");
+        verificar_cuda(cudaMalloc(&d_resultados_dists_persistente, total_results * sizeof(float)), "Malloc resultados_dists");
+        verificar_cuda(cudaMalloc(&d_num_resultados_persistente, num_queries * sizeof(int)), "Malloc num_resultados");
+        verificar_cuda(cudaMalloc(&d_queries_persistente, num_queries * sizeof(float3)), "Malloc queries");
+        verificar_cu(cuMemAlloc(&d_params_persistente, sizeof(DatosLanzamiento)), "Malloc params");
+        
+        buffers_inicializados = true;
+        max_batch_size = num_queries;
+        k_actual = k;
+        std::cout << "Buffers para batch inicializados: " << num_queries << " queries x k=" << k << std::endl;
+    }
+    
+    // ========================================================================
+    // PREPARAR QUERIES EN GPU
+    // ========================================================================
+    std::vector<float3> queries_gpu(num_queries);
+    for (int i = 0; i < num_queries; i++) {
+        Punto3D q = (tipo_distancia == 3) ? queries[i].normalizar() : queries[i];
+        queries_gpu[i] = make_float3(q.x, q.y, q.z);
+    }
+    
+    verificar_cuda(
+        cudaMemcpy(d_queries_persistente, queries_gpu.data(), 
+                   num_queries * sizeof(float3), cudaMemcpyHostToDevice),
+        "Copiar queries a GPU"
+    );
+    
+    // Reset contadores de resultados (todos a 0)
+    verificar_cuda(
+        cudaMemset(d_num_resultados_persistente, 0, num_queries * sizeof(int)),
+        "Reset num_resultados"
+    );
+    
+    // ========================================================================
+    // CONFIGURAR PARAMETROS PARA BATCH COMPLETO
+    // ========================================================================
+    DatosLanzamiento params_host;
+    params_host.puntos_datos = reinterpret_cast<float3*>(buffer_puntos);
+    params_host.ids_datos = reinterpret_cast<int*>(buffer_ids);
+    params_host.num_puntos = static_cast<int>(datos_usar.size());
+    params_host.queries = d_queries_persistente;
+    params_host.num_queries = num_queries;
+    params_host.radio = radio_refine;
+    params_host.resultados_ids = d_resultados_ids_persistente;
+    params_host.resultados_dists = d_resultados_dists_persistente;
+    params_host.num_resultados = d_num_resultados_persistente;
+    params_host.k = k;
+    params_host.tipo_distancia = tipo_distancia;
+    params_host.gas_handle = gas_handle;
+    
+    verificar_cuda(
+        cudaMemcpy(reinterpret_cast<void*>(d_params_persistente), &params_host, 
+                   sizeof(DatosLanzamiento), cudaMemcpyHostToDevice),
+        "Copiar params a GPU"
+    );
+    
+    // ========================================================================
+    // LANZAR TODAS LAS QUERIES EN PARALELO!
+    // ========================================================================
+    // optixLaunch con (num_queries, 1, 1) lanza num_queries threads
+    // Cada thread usa optixGetLaunchIndex() para saber cual query procesar
+    std::cout << "Lanzando " << num_queries << " queries en paralelo..." << std::endl;
+    
+    verificar_optix(
+        optixLaunch(
+            pipeline, 0,
+            d_params_persistente,
+            sizeof(DatosLanzamiento),
+            &sbt,
+            num_queries,  // Lanzar num_queries threads en paralelo!
+            1, 1
+        ),
+        "optixLaunch batch"
+    );
+    
+    verificar_cuda(cudaDeviceSynchronize(), "Sync despues de optixLaunch");
+    
+    // ========================================================================
+    // RECUPERAR RESULTADOS DE TODAS LAS QUERIES
+    // ========================================================================
+    std::vector<int> h_num_resultados(num_queries);
+    verificar_cuda(
+        cudaMemcpy(h_num_resultados.data(), d_num_resultados_persistente, 
+                   num_queries * sizeof(int), cudaMemcpyDeviceToHost),
+        "Copiar num_resultados"
+    );
+    
+    // Copiar todos los resultados de una vez
+    size_t total_results = num_queries * k;
+    std::vector<int> all_ids(total_results);
+    std::vector<float> all_dists(total_results);
+    
+    verificar_cuda(
+        cudaMemcpy(all_ids.data(), d_resultados_ids_persistente, 
+                   total_results * sizeof(int), cudaMemcpyDeviceToHost),
+        "Copiar IDs"
+    );
+    verificar_cuda(
+        cudaMemcpy(all_dists.data(), d_resultados_dists_persistente, 
+                   total_results * sizeof(float), cudaMemcpyDeviceToHost),
+        "Copiar distancias"
+    );
+    
+    // Organizar resultados por query
+    for (int i = 0; i < num_queries; i++) {
+        std::vector<ResultadoVecino> res;
+        int num_res = std::min(h_num_resultados[i], k);
+        res.reserve(num_res);
+        
+        int offset = i * k;
+        for (int j = 0; j < num_res; j++) {
+            res.emplace_back(all_ids[offset + j], all_dists[offset + j]);
         }
         
-        auto res = buscar_radius(queries[i], radio);
-        
-        // Si no hay suficientes resultados, reconstruir GAS con radio mayor
-        if (res.size() < k) {
-            radio *= 2.0f;
-            std::cout << "Radio insuficiente, reconstruyendo GAS con radio=" << radio << std::endl;
-            construir_gas_con_radio(radio);
-            res = buscar_radius(queries[i], radio);
-        }
-        
-        if (res.size() > k) {
-            res.resize(k);
-        }
-        
+        // Ordenar por distancia (el heap no garantiza orden)
+        std::sort(res.begin(), res.end());
         resultados.push_back(res);
     }
     
+    std::cout << "Batch completado" << std::endl;
     return resultados;
 }
 
 void ArkadeOptiX::limpiar_recursos() {
+    // Liberar buffers persistentes
+    if (d_resultados_ids_persistente) cudaFree(d_resultados_ids_persistente);
+    if (d_resultados_dists_persistente) cudaFree(d_resultados_dists_persistente);
+    if (d_num_resultados_persistente) cudaFree(d_num_resultados_persistente);
+    if (d_queries_persistente) cudaFree(d_queries_persistente);
+    if (d_params_persistente) cuMemFree(d_params_persistente);
+    
     if (buffer_puntos) cudaFree(reinterpret_cast<void*>(buffer_puntos));
     if (buffer_ids) cudaFree(reinterpret_cast<void*>(buffer_ids));
     if (buffer_gas) cuMemFree(buffer_gas);

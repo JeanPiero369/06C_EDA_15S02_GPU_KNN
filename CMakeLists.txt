@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.18)
 project(Arkade_GPU_KNN LANGUAGES CXX CUDA)
 
+# Option to toggle CUDA support (on by default)
+option(USE_CUDA "Enable CUDA support (requires MSVC on Windows)" ON)
+
 # ============================================================================
 # CONFIGURACIÓN GENERAL
 # ============================================================================
@@ -31,10 +34,21 @@ include_directories(${OptiX_INCLUDE_DIR})
 # CUDA
 # ============================================================================
 
-find_package(CUDAToolkit REQUIRED)
-enable_language(CUDA)
+if (USE_CUDA)
+    find_package(CUDAToolkit REQUIRED)
+    enable_language(CUDA)
+    include_directories(${CUDAToolkit_INCLUDE_DIRS})
+else()
+    message(STATUS "Building without CUDA (USE_CUDA=OFF). PTX compilation and CUDA libs will be skipped.")
+endif()
 
-include_directories(${CUDAToolkit_INCLUDE_DIRS})
+if (WIN32 AND USE_CUDA AND NOT MSVC)
+    message(FATAL_ERROR "CUDA builds on Windows require the MSVC compiler (cl.exe).\n"
+        "Detected compiler is not MSVC. Recommended actions:\n"
+        " - Use an MSVC Kit via 'CMake: Select a Kit' (Visual Studio 2019/2022/2023).\n"
+        " - Or configure this project inside WSL/Linux and use GCC.\n"
+        " - If you prefer to build CPU-only, reconfigure with -DUSE_CUDA=OFF.")
+endif()
 
 # ============================================================================
 # FAISS (Facebook AI Similarity Search)
@@ -61,35 +75,37 @@ include_directories(${PROJECT_SOURCE_DIR}/include)
 include_directories(${PROJECT_SOURCE_DIR}/kernels)
 
 # ============================================================================
-# COMPILACIÓN DE KERNELS OptiX A PTX
+# COMPILACIÓN DE KERNELS OptiX A PTX (solo si USE_CUDA=ON)
 # ============================================================================
 
-set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} -use_fast_math)
+if (USE_CUDA)
+    set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} -use_fast_math)
 
-# Archivo de kernels OptiX
-set(ARKADE_KERNELS ${PROJECT_SOURCE_DIR}/kernels/arkade_kernels.cu)
+    # Archivo de kernels OptiX
+    set(ARKADE_KERNELS ${PROJECT_SOURCE_DIR}/kernels/arkade_kernels.cu)
 
-# Directorio de salida para PTX
-set(PTX_OUTPUT_DIR ${CMAKE_BINARY_DIR}/ptx)
-file(MAKE_DIRECTORY ${PTX_OUTPUT_DIR})
+    # Directorio de salida para PTX
+    set(PTX_OUTPUT_DIR ${CMAKE_BINARY_DIR}/ptx)
+    file(MAKE_DIRECTORY ${PTX_OUTPUT_DIR})
 
-# Custom command para compilar .cu a .ptx
-add_custom_command(
-    OUTPUT ${PTX_OUTPUT_DIR}/arkade_kernels.ptx
-    COMMAND ${CMAKE_CUDA_COMPILER} --ptx -arch=sm_86 -use_fast_math 
-        "-I${OptiX_INCLUDE_DIR}" 
-        "-I${CUDAToolkit_INCLUDE_DIRS}" 
-        "-I${PROJECT_SOURCE_DIR}/include" 
-        "${ARKADE_KERNELS}" 
-        -o "${PTX_OUTPUT_DIR}/arkade_kernels.ptx"
-    DEPENDS ${ARKADE_KERNELS}
-    COMMENT "Compilando kernels OptiX a PTX..."
-    VERBATIM
-)
+    # Custom command para compilar .cu a .ptx
+    add_custom_command(
+        OUTPUT ${PTX_OUTPUT_DIR}/arkade_kernels.ptx
+        COMMAND ${CMAKE_CUDA_COMPILER} --ptx -arch=sm_86 -use_fast_math
+            "-I${OptiX_INCLUDE_DIR}"
+            "-I${CUDAToolkit_INCLUDE_DIRS}"
+            "-I${PROJECT_SOURCE_DIR}/include"
+            "${ARKADE_KERNELS}"
+            -o "${PTX_OUTPUT_DIR}/arkade_kernels.ptx"
+        DEPENDS ${ARKADE_KERNELS}
+        COMMENT "Compilando kernels OptiX a PTX..."
+        VERBATIM
+    )
 
-add_custom_target(compile_ptx ALL
-    DEPENDS ${PTX_OUTPUT_DIR}/arkade_kernels.ptx
-)
+    add_custom_target(compile_ptx ALL
+        DEPENDS ${PTX_OUTPUT_DIR}/arkade_kernels.ptx
+    )
+endif()
 
 # ============================================================================
 # EJECUTABLE PRINCIPAL
@@ -99,19 +115,26 @@ add_executable(arkade_knn
     src/main.cpp
 )
 
-# Asegurar que PTX se compile antes del ejecutable
-add_dependencies(arkade_knn compile_ptx)
+# Asegurar que PTX se compile antes del ejecutable (solo si USE_CUDA)
+if (USE_CUDA)
+    add_dependencies(arkade_knn compile_ptx)
+endif()
 
 # ============================================================================
 # LINKEO DE LIBRERÍAS
 # ============================================================================
 
 target_link_libraries(arkade_knn
-    CUDA::cudart
-    CUDA::cuda_driver
     ${FAISS_LIBRARIES}
     ${FLANN_LIBRARIES}
 )
+
+if (USE_CUDA)
+    target_link_libraries(arkade_knn
+        CUDA::cudart
+        CUDA::cuda_driver
+    )
+endif()
 
 # OptiX es header-only excepto la inicialización
 # Buscar optix_stubs
@@ -130,20 +153,29 @@ endif()
 # ============================================================================
 
 # Path al archivo PTX (para que el ejecutable lo encuentre)
-target_compile_definitions(arkade_knn PRIVATE
-    PTX_PATH="${PTX_OUTPUT_DIR}/arkade_kernels.ptx"
-)
+if (USE_CUDA)
+    target_compile_definitions(arkade_knn PRIVATE
+        PTX_PATH="${PTX_OUTPUT_DIR}/arkade_kernels.ptx"
+    )
+else()
+    target_compile_definitions(arkade_knn PRIVATE
+        PTX_PATH=""
+    )
+endif()
 
 # ============================================================================
 # COPIAR ARCHIVOS PTX AL DIRECTORIO DEL EJECUTABLE
 # ============================================================================
 
-add_custom_command(TARGET arkade_knn POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        ${PTX_OUTPUT_DIR}/arkade_kernels.ptx
-        $<TARGET_FILE_DIR:arkade_knn>/arkade_kernels.ptx
-    COMMENT "Copiando PTX al directorio del ejecutable"
-)
+# Copiar PTX al directorio del ejecutable (si existe)
+if (USE_CUDA)
+    add_custom_command(TARGET arkade_knn POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${PTX_OUTPUT_DIR}/arkade_kernels.ptx
+            $<TARGET_FILE_DIR:arkade_knn>/arkade_kernels.ptx
+        COMMENT "Copiando PTX al directorio del ejecutable"
+    )
+endif()
 
 # ============================================================================
 # CONFIGURACIÓN DE COMPILACIÓN
@@ -179,4 +211,5 @@ message(STATUS "CUDA Toolkit: ${CUDAToolkit_VERSION}")
 message(STATUS "FAISS Libraries: ${FAISS_LIBRARIES}")
 message(STATUS "FLANN Libraries: ${FLANN_LIBRARIES}")
 message(STATUS "PTX Output: ${PTX_OUTPUT_DIR}")
+message(STATUS "USE_CUDA: ${USE_CUDA}")
 message(STATUS "=========================================")

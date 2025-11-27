@@ -12,7 +12,8 @@
 // CONFIGURACIÓN GLOBAL
 // ============================================================================
 
-const int K = 10; // Número de vecinos a buscar
+int K = 10;                 // Número de vecinos a buscar (configurable via argumento)
+float RADIO = 100.0f;       // Radio para radius query (configurable via argumento)
 const std::string RUTA_DATOS = "data/data.csv";
 const std::string RUTA_QUERIES = "data/queries.csv";
 const std::string RUTA_GROUND_TRUTH_L2 = "data/knn_euclidean.csv";
@@ -159,6 +160,18 @@ int main(int argc, char** argv) {
     std::cout << "ARKADE: k-NN Search con GPU Ray Tracing" << std::endl;
     std::cout << "========================================\n" << std::endl;
     
+    // Parsear argumentos: arkade_knn.exe [radio] [k]
+    if (argc >= 2) {
+        RADIO = std::stof(argv[1]);
+    }
+    if (argc >= 3) {
+        K = std::stoi(argv[2]);
+    }
+    
+    std::cout << "Uso: arkade_knn.exe [radio] [k]" << std::endl;
+    std::cout << "Radio: " << RADIO << std::endl;
+    std::cout << "K (vecinos): " << K << std::endl;
+    
     try {
         // ====================================================================
         // 1. CARGAR DATOS
@@ -195,7 +208,7 @@ int main(int argc, char** argv) {
             arkade.construir_gas();
             
             auto inicio = std::chrono::high_resolution_clock::now();
-            auto resultados = arkade.buscar_knn_batch(queries, K);
+            auto resultados = arkade.buscar_knn_batch(queries, K, RADIO);
             auto fin = std::chrono::high_resolution_clock::now();
             double tiempo_ms = std::chrono::duration<double, std::milli>(fin - inicio).count();
             std::cout << "Arkade OptiX L2 (busqueda): " << tiempo_ms << " ms" << std::endl;
@@ -204,7 +217,7 @@ int main(int argc, char** argv) {
             auto metricas = validar_resultados(resultados, gt_l2, K);
             resultados_l2.emplace_back("Arkade OptiX", tiempo_ms, metricas);
         }
-        
+        /*
         // FAISS CPU L2
         {
             std::cout << "\n--- FAISS CPU L2 ---" << std::endl;
@@ -221,7 +234,7 @@ int main(int argc, char** argv) {
             auto metricas = validar_resultados(resultados, gt_l2, K);
             resultados_l2.emplace_back("FAISS CPU", tiempo_ms, metricas);
         }
-        
+        */
         // FAISS GPU L2 - DESHABILITADO (vcpkg FAISS sin GPU support)
         /*
         {
@@ -238,7 +251,7 @@ int main(int argc, char** argv) {
             resultados_l2.emplace_back("FAISS GPU", metricas);
         }
         */
-        
+
         imprimir_tabla_comparacion("L2 (Euclidean)", resultados_l2);
         
         // ====================================================================
@@ -260,7 +273,7 @@ int main(int argc, char** argv) {
             arkade.construir_gas();
             
             auto inicio = std::chrono::high_resolution_clock::now();
-            auto resultados = arkade.buscar_knn_batch(queries, K);
+            auto resultados = arkade.buscar_knn_batch(queries, K, RADIO);
             auto fin = std::chrono::high_resolution_clock::now();
             double tiempo_ms = std::chrono::duration<double, std::milli>(fin - inicio).count();
             std::cout << "Arkade OptiX L1 (busqueda): " << tiempo_ms << " ms" << std::endl;
@@ -269,7 +282,7 @@ int main(int argc, char** argv) {
             auto metricas = validar_resultados(resultados, gt_l1, K);
             resultados_l1.emplace_back("Arkade OptiX", tiempo_ms, metricas);
         }
-        
+        /*
         // FastRNN L1 (GPU Baseline - usa RT Cores con ajuste para Manhattan)
         {
             std::cout << "\n--- FastRNN GPU L1 (GPU Baseline) ---" << std::endl;
@@ -278,7 +291,7 @@ int main(int argc, char** argv) {
             fastrnn.construir_indice();
             
             auto inicio = std::chrono::high_resolution_clock::now();
-            auto resultados = fastrnn.buscar_knn_batch(queries, K);
+            auto resultados = fastrnn.buscar_knn_batch(queries, K, RADIO);
             auto fin = std::chrono::high_resolution_clock::now();
             double tiempo_ms = std::chrono::duration<double, std::milli>(fin - inicio).count();
             std::cout << "FastRNN GPU L1 (busqueda): " << tiempo_ms << " ms" << std::endl;
@@ -305,7 +318,7 @@ int main(int argc, char** argv) {
             auto metricas = validar_resultados(resultados, gt_l1, K);
             resultados_l1.emplace_back("FLANN CPU (GPU Baseline)", tiempo_ms, metricas);
         }
-        
+        */
         imprimir_tabla_comparacion("L1 (Manhattan)", resultados_l1);
         
         // ====================================================================
@@ -327,7 +340,7 @@ int main(int argc, char** argv) {
             arkade.construir_gas();
             
             auto inicio = std::chrono::high_resolution_clock::now();
-            auto resultados = arkade.buscar_knn_batch(queries, K);
+            auto resultados = arkade.buscar_knn_batch(queries, K, RADIO);
             auto fin = std::chrono::high_resolution_clock::now();
             double tiempo_ms = std::chrono::duration<double, std::milli>(fin - inicio).count();
             std::cout << "Arkade OptiX L∞ (busqueda): " << tiempo_ms << " ms" << std::endl;
@@ -336,7 +349,7 @@ int main(int argc, char** argv) {
             auto metricas = validar_resultados(resultados, gt_linf, K);
             resultados_linf.emplace_back("Arkade OptiX", tiempo_ms, metricas);
         }
-        
+        /*
         // FastRNN L∞ (GPU Baseline - usa RT Cores con ajuste para Chebyshev)
         {
             std::cout << "\n--- FastRNN GPU L∞ (GPU Baseline) ---" << std::endl;
@@ -345,7 +358,7 @@ int main(int argc, char** argv) {
             fastrnn.construir_indice();
             
             auto inicio = std::chrono::high_resolution_clock::now();
-            auto resultados = fastrnn.buscar_knn_batch(queries, K);
+            auto resultados = fastrnn.buscar_knn_batch(queries, K, RADIO);
             auto fin = std::chrono::high_resolution_clock::now();
             double tiempo_ms = std::chrono::duration<double, std::milli>(fin - inicio).count();
             std::cout << "FastRNN GPU L∞ (busqueda): " << tiempo_ms << " ms" << std::endl;
@@ -372,7 +385,7 @@ int main(int argc, char** argv) {
             auto metricas = validar_resultados(resultados, gt_linf, K);
             resultados_linf.emplace_back("FLANN CPU (GPU Baseline)", tiempo_ms, metricas);
         }
-        
+        */
         imprimir_tabla_comparacion("L∞ (Chebyshev)", resultados_linf);
         
         // ====================================================================
@@ -394,7 +407,7 @@ int main(int argc, char** argv) {
             arkade.construir_gas();
             
             auto inicio = std::chrono::high_resolution_clock::now();
-            auto resultados = arkade.buscar_knn_batch(queries, K);
+            auto resultados = arkade.buscar_knn_batch(queries, K, RADIO);
             auto fin = std::chrono::high_resolution_clock::now();
             double tiempo_ms = std::chrono::duration<double, std::milli>(fin - inicio).count();
             std::cout << "Arkade OptiX Cosine (busqueda): " << tiempo_ms << " ms" << std::endl;
@@ -403,7 +416,7 @@ int main(int argc, char** argv) {
             auto metricas = validar_resultados(resultados, gt_cosine, K);
             resultados_cosine.emplace_back("Arkade OptiX", tiempo_ms, metricas);
         }
-        
+        /*
         // FAISS CPU Cosine
         {
             std::cout << "\n--- FAISS CPU Cosine ---" << std::endl;
@@ -420,7 +433,7 @@ int main(int argc, char** argv) {
             auto metricas = validar_resultados(resultados, gt_cosine, K);
             resultados_cosine.emplace_back("FAISS CPU", tiempo_ms, metricas);
         }
-        
+        */
         // FAISS GPU Cosine - DESHABILITADO (vcpkg FAISS sin GPU support)
         /*
         {
