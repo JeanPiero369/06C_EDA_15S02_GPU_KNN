@@ -160,17 +160,40 @@ int main(int argc, char** argv) {
     std::cout << "ARKADE: k-NN Search con GPU Ray Tracing" << std::endl;
     std::cout << "========================================\n" << std::endl;
     
-    // Parsear argumentos: arkade_knn.exe [radio] [k]
+    // Parsear argumentos: arkade_knn.exe [radio] [k] [distancia]
+    // distancia: l2, l1, linf, cosine, all (default: all)
+    std::string tipo_distancia = "all";
+    
     if (argc >= 2) {
         RADIO = std::stof(argv[1]);
     }
     if (argc >= 3) {
         K = std::stoi(argv[2]);
     }
+    if (argc >= 4) {
+        tipo_distancia = argv[3];
+        // Convertir a minúsculas
+        std::transform(tipo_distancia.begin(), tipo_distancia.end(), tipo_distancia.begin(), ::tolower);
+    }
     
-    std::cout << "Uso: arkade_knn.exe [radio] [k]" << std::endl;
-    std::cout << "Radio: " << RADIO << std::endl;
-    std::cout << "K (vecinos): " << K << std::endl;
+    // Validar tipo de distancia
+    bool ejecutar_l2 = (tipo_distancia == "all" || tipo_distancia == "l2" || tipo_distancia == "euclidean");
+    bool ejecutar_l1 = (tipo_distancia == "all" || tipo_distancia == "l1" || tipo_distancia == "manhattan");
+    bool ejecutar_linf = (tipo_distancia == "all" || tipo_distancia == "linf" || tipo_distancia == "chebyshev");
+    bool ejecutar_cosine = (tipo_distancia == "all" || tipo_distancia == "cosine");
+    
+    if (!ejecutar_l2 && !ejecutar_l1 && !ejecutar_linf && !ejecutar_cosine) {
+        std::cerr << "Error: Tipo de distancia no válido: " << tipo_distancia << std::endl;
+        std::cerr << "Opciones válidas: l2, euclidean, l1, manhattan, linf, chebyshev, cosine, all" << std::endl;
+        return 1;
+    }
+    
+    std::cout << "Uso: arkade_knn.exe [radio] [k] [distancia]" << std::endl;
+    std::cout << "  distancia: l2|euclidean, l1|manhattan, linf|chebyshev, cosine, all (default)" << std::endl;
+    std::cout << "\nConfiguracion actual:" << std::endl;
+    std::cout << "  Radio: " << RADIO << std::endl;
+    std::cout << "  K (vecinos): " << K << std::endl;
+    std::cout << "  Distancia: " << tipo_distancia << std::endl;
     
     try {
         // ====================================================================
@@ -193,6 +216,7 @@ int main(int argc, char** argv) {
         // 2. EXPERIMENTOS CON L2 (EUCLIDEAN)
         // ====================================================================
         
+        if (ejecutar_l2) {
         std::cout << "\n========================================" << std::endl;
         std::cout << "DISTANCIA L2 (EUCLIDEAN)" << std::endl;
         std::cout << "========================================\n" << std::endl;
@@ -253,11 +277,13 @@ int main(int argc, char** argv) {
         */
 
         imprimir_tabla_comparacion("L2 (Euclidean)", resultados_l2);
+        } // fin ejecutar_l2
         
         // ====================================================================
         // 3. EXPERIMENTOS CON L1 (MANHATTAN)
         // ====================================================================
         
+        if (ejecutar_l1) {
         std::cout << "\n========================================" << std::endl;
         std::cout << "DISTANCIA L1 (MANHATTAN)" << std::endl;
         std::cout << "========================================\n" << std::endl;
@@ -320,11 +346,13 @@ int main(int argc, char** argv) {
         }
         */
         imprimir_tabla_comparacion("L1 (Manhattan)", resultados_l1);
+        } // fin ejecutar_l1
         
         // ====================================================================
         // 4. EXPERIMENTOS CON L∞ (CHEBYSHEV)
         // ====================================================================
         
+        if (ejecutar_linf) {
         std::cout << "\n========================================" << std::endl;
         std::cout << "DISTANCIA L∞ (CHEBYSHEV)" << std::endl;
         std::cout << "========================================\n" << std::endl;
@@ -387,11 +415,13 @@ int main(int argc, char** argv) {
         }
         */
         imprimir_tabla_comparacion("L∞ (Chebyshev)", resultados_linf);
+        } // fin ejecutar_linf
         
         // ====================================================================
         // 5. EXPERIMENTOS CON COSINE
         // ====================================================================
         
+        if (ejecutar_cosine) {
         std::cout << "\n========================================" << std::endl;
         std::cout << "DISTANCIA COSINE" << std::endl;
         std::cout << "========================================\n" << std::endl;
@@ -452,6 +482,7 @@ int main(int argc, char** argv) {
         */
         
         imprimir_tabla_comparacion("Cosine", resultados_cosine);
+        } // fin ejecutar_cosine
         
         std::cout << "\n========================================" << std::endl;
         std::cout << "EXPERIMENTOS COMPLETADOS" << std::endl;
